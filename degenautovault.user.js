@@ -1,11 +1,19 @@
 // ==UserScript==
-// @name         HomeBase DegenVault
-// @version      1.10
-// @description  Automatically sends a percentage of your profits to the Degen.com vault. Customized for HomeBase Affiliates.
+// @name         HomeBase AutoVault
+// @namespace    https://github.com/ZerocuCodes
+// @version      1.0.0
+// @description  Automatically vaults a percentage of your profits on degen.com into the site's built-in vault
 // @author       Zerocu
+// @license      MIT
+// @homepageURL  https://github.com/ZerocuCodes/Homebase-AutoVault-for-Degen.com
+// @supportURL   https://github.com/ZerocuCodes/Homebase-AutoVault-for-Degen.com/issues
+// @updateURL    https://raw.githubusercontent.com/ZerocuCodes/Homebase-AutoVault-for-Degen.com/main/degenautovault.user.js
+// @downloadURL  https://raw.githubusercontent.com/ZerocuCodes/Homebase-AutoVault-for-Degen.com/main/degenautovault.user.js
 // @match        https://degen.com/*
-// @run-at       document-end
-// @namespace    HomeBase DegenVault
+// @match        https://*.degen.com/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=degen.com
+// @run-at       document-idle
+// @grant        none
 // ==/UserScript==
 
 (function() {
