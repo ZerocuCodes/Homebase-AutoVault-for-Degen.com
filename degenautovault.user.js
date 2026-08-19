@@ -148,6 +148,19 @@
             });
             return this._fetch('/balance/vault/deposit', { method: 'POST', body });
         }
+        // Read-only: the current account's profile — source of the user id the
+        // statistics endpoints are keyed by.
+        async getProfile() {
+            return this._fetch('/users/profile', { method: 'GET' });
+        }
+        // Read-only: public user object; .statistics.wagered is Degen's
+        // server-side lifetime USD-equivalent wagered counter.
+        async getPublicUser(id) {
+            return this._fetch(`/users/public/${encodeURIComponent(id)}`, { method: 'GET' });
+        }
+        async getUserStats(id) {
+            return this._fetch(`/users/${encodeURIComponent(id)}/stats`, { method: 'GET' });
+        }
     }
 
     let apiRateInfo = { remaining: null, resetMs: null };
@@ -292,7 +305,7 @@
     // --- Floaty UI Widget ---
     let currentViewMode = 'full';
 
-    function createVaultFloatyUI(startCallback, stopCallback, getParams, setParams, vaultDisplay, syncCallback) {
+    function createVaultFloatyUI(startCallback, stopCallback, getParams, setParams, vaultDisplay, syncCallback, fetchWalletsCallback, manualVaultCallback) {
         if (document.getElementById('degenvault-floaty')) document.getElementById('degenvault-floaty').remove();
         if (document.getElementById('degenvault-stealth')) document.getElementById('degenvault-stealth').remove();
 
@@ -414,6 +427,39 @@
             text-align: right;
         }
         #degenvault-floaty input:focus { outline: none; border-color: var(--hb-accent); }
+        #degenvault-floaty select {
+            background: var(--hb-panel-2);
+            color: #eaffe0;
+            border: 1px solid var(--hb-border);
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 12px;
+            min-width: 90px;
+        }
+        #degenvault-floaty select:focus { outline: none; border-color: var(--hb-accent); }
+        #degenvault-floaty .dv-tabs { display: flex; gap: 4px; }
+        #degenvault-floaty .dv-tab {
+            flex: 1;
+            background: transparent;
+            border: 1px solid var(--hb-border);
+            border-radius: 3px;
+            color: var(--hb-text-dim);
+            padding: 5px 8px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            cursor: pointer;
+        }
+        #degenvault-floaty .dv-tab:hover { color: var(--hb-text); }
+        #degenvault-floaty .dv-tab.active {
+            background: var(--hb-panel-2);
+            color: var(--hb-accent);
+            border-color: var(--hb-accent);
+        }
+        #degenvault-floaty .dv-pane { display: flex; flex-direction: column; gap: 10px; }
+        #degenvault-floaty .dv-pane.hidden { display: none; }
+        #degenvault-floaty .dv-max-btn { flex: 0 0 auto; padding: 4px 8px; font-size: 10px; }
         #degenvault-floaty .dv-btn-row { display: flex; gap: 6px; margin-top: 4px; }
         #degenvault-floaty .dv-btn {
             flex: 1;
@@ -436,14 +482,15 @@
         #degenvault-floaty .dv-btn.danger:hover:not(:disabled) { background: #dc2626; }
         #degenvault-floaty .dv-btn.ghost { background: transparent; }
         #degenvault-floaty .dv-stats {
-            display: flex;
-            justify-content: space-between;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px 12px;
             padding-top: 8px;
             border-top: 1px solid var(--hb-border);
             font-size: 11px;
         }
         #degenvault-floaty .dv-stat { display: flex; flex-direction: column; gap: 2px; }
-        #degenvault-floaty .dv-stat-label { color: var(--hb-text-dim); font-size: 10px; text-transform: uppercase; }
+        #degenvault-floaty .dv-stat-label { color: var(--hb-text-dim); font-size: 10px; text-transform: uppercase; display: flex; align-items: center; gap: 4px; }
         #degenvault-floaty .dv-stat-value { color: var(--hb-accent); font-weight: 700; text-shadow: 0 0 6px rgba(0,255,65,0.4); }
         #degenvault-floaty .dv-footer {
             display: flex;
@@ -564,7 +611,8 @@
         #degenvault-stealth.running { background: #00FF41; }
         #degenvault-stealth.hidden { display: none; }
         @media (max-width: 500px) {
-            #degenvault-floaty { right: 10px !important; left: 10px !important; max-width: none; min-width: auto; }
+            #degenvault-floaty { max-width: none; min-width: auto; }
+            #degenvault-floaty:not(.dv-dragged) { right: 10px !important; left: 10px !important; }
         }
         `;
         document.head.appendChild(style);
@@ -598,6 +646,11 @@
         const content = document.createElement('div');
         content.className = 'dv-content';
         content.innerHTML = `
+            <div class="dv-tabs">
+                <button class="dv-tab active" id="dvTabAuto">Auto</button>
+                <button class="dv-tab" id="dvTabManual">Manual</button>
+            </div>
+            <div class="dv-pane" id="dvPaneAuto">
             <div class="dv-row">
                 <span class="dv-label-group">
                     <span class="dv-label">Tracking</span>
@@ -638,7 +691,38 @@
             </div>
             <div class="dv-btn-row">
                 <button class="dv-btn primary" id="vaultStartBtn">Start</button>
+                <button class="dv-btn ghost" id="vaultSaveBtn">Save</button>
                 <button class="dv-btn danger" id="vaultStopBtn" disabled>Stop</button>
+            </div>
+            </div>
+            <div class="dv-pane hidden" id="dvPaneManual">
+                <div class="dv-row">
+                    <span class="dv-label-group">
+                        <span class="dv-label">Currency</span>
+                        <span class="dv-help" data-tip="Pick which wallet currency to vault from. The list comes straight from your Degen wallets; hit the refresh button to re-read balances.">?</span>
+                    </span>
+                    <span class="dv-inline-group">
+                        <select id="dvManualAsset"></select>
+                        <button class="dv-sync-btn" id="dvManualRefresh" type="button" title="Refresh balances">⟳</button>
+                    </span>
+                </div>
+                <div class="dv-row">
+                    <span class="dv-label-group">
+                        <span class="dv-label">Amount</span>
+                        <span class="dv-help" data-tip="How much of the selected currency to move into your vault right now. Max fills in your full wallet balance.">?</span>
+                    </span>
+                    <span class="dv-inline-group">
+                        <input type="number" id="dvManualAmount" min="0" step="0.00000001" placeholder="0.0">
+                        <button class="dv-btn ghost dv-max-btn" id="dvManualMax" type="button">Max</button>
+                    </span>
+                </div>
+                <div class="dv-row">
+                    <span class="dv-label">Available</span>
+                    <span class="dv-stat-value" id="dvManualAvail">—</span>
+                </div>
+                <div class="dv-btn-row">
+                    <button class="dv-btn primary" id="dvManualDeposit">Deposit to Vault</button>
+                </div>
             </div>
             <div class="dv-stats">
                 <div class="dv-stat">
@@ -652,6 +736,10 @@
                 <div class="dv-stat">
                     <span class="dv-stat-label">Actions/hr</span>
                     <span class="dv-stat-value" id="dvVaultCount">0/50</span>
+                </div>
+                <div class="dv-stat">
+                    <span class="dv-stat-label">7d Wager <span class="dv-help" data-tip="Total wagered on Degen over the last 7 days (USD value, all currencies — read from Degen's own lifetime counter, so play from every device counts). Amber while the first week of tracking warms up; during warm-up the figure reads LOW. Tracks whenever a Degen tab is open, even while vaulting is stopped.">?</span></span>
+                    <span class="dv-stat-value" id="dvWager7d">—</span>
                 </div>
             </div>
         `;
@@ -736,28 +824,107 @@
         stealthDot.onclick = () => { setViewMode('full'); minBtn.textContent = '−'; };
         closeBtn.onclick = () => { widget.remove(); stealthDot.remove(); };
 
+        // Drag: mouse + touch, with the position persisted so the widget stays
+        // where the user put it across page loads. On phones the widget is
+        // stretched edge-to-edge by CSS until the first drag; the width is
+        // locked at that moment so it doesn't snap while moving.
+        const POS_KEY = 'degenvault-widget-pos';
         let isDragging = false, dragOffsetX = 0, dragOffsetY = 0;
-        header.addEventListener('mousedown', function(e) {
-            if (e.target.closest('.dv-header-btns')) return;
+
+        function savePosition() {
+            try {
+                localStorage.setItem(POS_KEY, JSON.stringify({
+                    left: parseFloat(widget.style.left),
+                    top: parseFloat(widget.style.top),
+                    width: parseFloat(widget.style.width) || null
+                }));
+            } catch (e) {}
+        }
+        function restorePosition() {
+            let pos = null;
+            try { pos = JSON.parse(localStorage.getItem(POS_KEY)); } catch (e) {}
+            if (!pos || !isFinite(pos.left) || !isFinite(pos.top)) return;
+            widget.classList.add('dv-dragged');
+            if (isFinite(pos.width) && pos.width > 0) widget.style.width = Math.min(pos.width, window.innerWidth - 8) + 'px';
+            widget.style.left = Math.max(0, Math.min(window.innerWidth - widget.offsetWidth, pos.left)) + 'px';
+            widget.style.top = Math.max(0, Math.min(window.innerHeight - 40, pos.top)) + 'px';
+            widget.style.right = 'auto';
+        }
+
+        function dragStart(x, y, target) {
+            if (target.closest && target.closest('.dv-header-btns')) return false;
+            const rect = widget.getBoundingClientRect();
             isDragging = true;
-            dragOffsetX = e.clientX - widget.getBoundingClientRect().left;
-            dragOffsetY = e.clientY - widget.getBoundingClientRect().top;
-            e.preventDefault();
-        });
-        document.addEventListener('mousemove', function(e) {
+            dragOffsetX = x - rect.left;
+            dragOffsetY = y - rect.top;
+            return true;
+        }
+        function dragMove(x, y) {
             if (!isDragging) return;
-            let newLeft = e.clientX - dragOffsetX;
-            let newTop = e.clientY - dragOffsetY;
+            if (!widget.classList.contains('dv-dragged')) {
+                widget.style.width = widget.getBoundingClientRect().width + 'px';
+                widget.classList.add('dv-dragged');
+            }
+            let newLeft = x - dragOffsetX;
+            let newTop = y - dragOffsetY;
             newLeft = Math.max(0, Math.min(window.innerWidth - widget.offsetWidth, newLeft));
             newTop = Math.max(0, Math.min(window.innerHeight - widget.offsetHeight, newTop));
             widget.style.left = newLeft + 'px';
             widget.style.top = newTop + 'px';
             widget.style.right = 'auto';
+        }
+        function dragEnd() {
+            if (!isDragging) return;
+            isDragging = false;
+            if (widget.classList.contains('dv-dragged') && widget.style.left) savePosition();
+        }
+
+        header.addEventListener('mousedown', function(e) {
+            if (dragStart(e.clientX, e.clientY, e.target)) e.preventDefault();
         });
-        document.addEventListener('mouseup', () => { isDragging = false; });
+        document.addEventListener('mousemove', (e) => dragMove(e.clientX, e.clientY));
+        document.addEventListener('mouseup', dragEnd);
+        header.addEventListener('touchstart', function(e) {
+            const t = e.touches[0];
+            if (t && dragStart(t.clientX, t.clientY, e.target)) e.preventDefault();
+        }, { passive: false });
+        document.addEventListener('touchmove', function(e) {
+            if (!isDragging) return;
+            const t = e.touches[0];
+            if (t) { dragMove(t.clientX, t.clientY); e.preventDefault(); }
+        }, { passive: false });
+        document.addEventListener('touchend', dragEnd);
+        document.addEventListener('touchcancel', dragEnd);
 
         const startBtn = content.querySelector('#vaultStartBtn');
+        const saveBtn = content.querySelector('#vaultSaveBtn');
         const stopBtn = content.querySelector('#vaultStopBtn');
+        const saveAmountInput = content.querySelector('#vaultSaveAmount');
+        const bigWinThresholdInput = content.querySelector('#vaultBigWinThreshold');
+        const bigWinMultiplierInput = content.querySelector('#vaultBigWinMultiplier');
+        const checkIntervalInput = content.querySelector('#vaultCheckInterval');
+
+        // Read every setting straight from the inputs, clamp, and write the
+        // clamped values back. Called on Start and Save so the numbers shown
+        // are always exactly what gets used — mobile keyboards don't reliably
+        // fire the change event before a button tap, so relying on onchange
+        // alone silently reverted edits.
+        function readSettingsFromInputs() {
+            let sa = parseFloat(saveAmountInput.value);
+            if (isNaN(sa) || sa < 0) sa = 0;
+            if (sa > 1) sa = 1;
+            let bt = parseFloat(bigWinThresholdInput.value);
+            if (isNaN(bt) || bt < 1) bt = 1;
+            let bm = parseFloat(bigWinMultiplierInput.value);
+            if (isNaN(bm) || bm < 1) bm = 1;
+            let ci = parseInt(checkIntervalInput.value, 10);
+            if (isNaN(ci) || ci < 10) ci = 10;
+            saveAmountInput.value = sa;
+            bigWinThresholdInput.value = bt;
+            bigWinMultiplierInput.value = bm;
+            checkIntervalInput.value = ci;
+            return { saveAmount: sa, bigWinThreshold: bt, bigWinMultiplier: bm, checkInterval: ci };
+        }
         const vaultCountEl = content.querySelector('#dvVaultCount');
         const walletBalEl = content.querySelector('#dvWalletBal');
         const trackedAssetEl = content.querySelector('#dvTrackedAsset');
@@ -779,7 +946,18 @@
             stopBtn.disabled = !isRunning;
         }
 
-        startBtn.onclick = () => { setRunningState(true); startCallback(); updateVaultCountUI(); };
+        startBtn.onclick = () => {
+            setParams(readSettingsFromInputs(), { restart: false });
+            setRunningState(true);
+            startCallback();
+            updateVaultCountUI();
+        };
+        saveBtn.onclick = () => {
+            setParams(readSettingsFromInputs());
+            logActivity('Settings saved', 'success');
+            saveBtn.textContent = 'Saved ✓';
+            setTimeout(() => { saveBtn.textContent = 'Save'; }, 1200);
+        };
         stopBtn.onclick = () => { setRunningState(false); stopCallback(); updateVaultCountUI(); };
 
         function updateWalletBalanceUI(value) {
@@ -802,33 +980,140 @@
             };
         }
 
-        content.querySelector('#vaultSaveAmount').onchange = function() {
+        // --- Tabs (Auto / Manual) ---
+        const tabAuto = content.querySelector('#dvTabAuto');
+        const tabManual = content.querySelector('#dvTabManual');
+        const paneAuto = content.querySelector('#dvPaneAuto');
+        const paneManual = content.querySelector('#dvPaneManual');
+        function showTab(which) {
+            const manual = which === 'manual';
+            tabAuto.classList.toggle('active', !manual);
+            tabManual.classList.toggle('active', manual);
+            paneAuto.classList.toggle('hidden', manual);
+            paneManual.classList.toggle('hidden', !manual);
+            if (manual) populateManualAssets();
+        }
+        tabAuto.onclick = () => showTab('auto');
+        tabManual.onclick = () => showTab('manual');
+
+        // --- Manual vaulting ---
+        const manualAssetSelect = content.querySelector('#dvManualAsset');
+        const manualRefreshBtn = content.querySelector('#dvManualRefresh');
+        const manualAmountInput = content.querySelector('#dvManualAmount');
+        const manualMaxBtn = content.querySelector('#dvManualMax');
+        const manualAvailEl = content.querySelector('#dvManualAvail');
+        const manualDepositBtn = content.querySelector('#dvManualDeposit');
+        let manualWallets = [];
+
+        function manualSelected() {
+            return manualWallets.find(w => (w.asset || '').toUpperCase() === manualAssetSelect.value) || null;
+        }
+        function updateManualAvail() {
+            const w = manualSelected();
+            const bal = w ? parseFloat(w.balance) : NaN;
+            manualAvailEl.textContent = !isNaN(bal) ? `${bal.toFixed(8)} ${(w.asset || '').toUpperCase()}` : '—';
+        }
+        async function populateManualAssets() {
+            manualRefreshBtn.classList.add('spinning');
+            const prev = manualAssetSelect.value;
+            const list = await fetchWalletsCallback();
+            manualRefreshBtn.classList.remove('spinning');
+            if (!Array.isArray(list)) {
+                if (!manualWallets.length) manualAvailEl.textContent = 'API error';
+                return;
+            }
+            manualWallets = list;
+            manualAssetSelect.innerHTML = '';
+            for (const w of list) {
+                const a = (w.asset || '').toUpperCase();
+                if (!a) continue;
+                const opt = document.createElement('option');
+                opt.value = a;
+                opt.textContent = a;
+                manualAssetSelect.appendChild(opt);
+            }
+            const want = prev || (ASSET || '').toUpperCase();
+            if (want && [...manualAssetSelect.options].some(o => o.value === want)) manualAssetSelect.value = want;
+            updateManualAvail();
+        }
+        manualAssetSelect.onchange = updateManualAvail;
+        manualRefreshBtn.onclick = () => populateManualAssets();
+        manualMaxBtn.onclick = () => {
+            const w = manualSelected();
+            const bal = w ? parseFloat(w.balance) : NaN;
+            if (!isNaN(bal)) manualAmountInput.value = bal.toFixed(8);
+        };
+        manualDepositBtn.onclick = async () => {
+            const asset = manualAssetSelect.value;
+            const amt = parseFloat(manualAmountInput.value);
+            if (!asset) { logActivity('Manual vault: pick a currency first', 'warning'); return; }
+            if (isNaN(amt) || amt <= 0) { logActivity('Manual vault: enter an amount above 0', 'warning'); return; }
+            const w = manualSelected();
+            const bal = w ? parseFloat(w.balance) : NaN;
+            if (!isNaN(bal) && amt > bal + 1e-9) {
+                logActivity(`Manual vault: amount exceeds available ${bal.toFixed(8)} ${asset}`, 'warning');
+                return;
+            }
+            manualDepositBtn.disabled = true;
+            manualDepositBtn.textContent = 'Vaulting…';
+            const ok = await manualVaultCallback(asset, amt);
+            manualDepositBtn.textContent = ok ? 'Vaulted ✓' : 'Failed ✗';
+            setTimeout(() => {
+                manualDepositBtn.textContent = 'Deposit to Vault';
+                manualDepositBtn.disabled = false;
+            }, 1400);
+            if (ok) {
+                manualAmountInput.value = '';
+                populateManualAssets();
+            }
+        };
+
+        saveAmountInput.onchange = function() {
             let v = parseFloat(this.value);
             if (isNaN(v) || v < 0) v = 0;
             if (v > 1) v = 1;
             setParams({saveAmount: v});
             this.value = v;
         };
-        content.querySelector('#vaultBigWinThreshold').onchange = function() {
+        bigWinThresholdInput.onchange = function() {
             let v = parseFloat(this.value);
             if (isNaN(v) || v < 1) v = 1;
             setParams({bigWinThreshold: v});
             this.value = v;
         };
-        content.querySelector('#vaultBigWinMultiplier').onchange = function() {
+        bigWinMultiplierInput.onchange = function() {
             let v = parseFloat(this.value);
             if (isNaN(v) || v < 1) v = 1;
             setParams({bigWinMultiplier: v});
             this.value = v;
         };
-        content.querySelector('#vaultCheckInterval').onchange = function() {
+        checkIntervalInput.onchange = function() {
             let v = parseInt(this.value, 10);
             if (isNaN(v) || v < 10) v = 10;
             setParams({checkInterval: v});
             this.value = v;
         };
+        // Persist as the user types (no clamping mid-edit, no restart) so the
+        // value survives an SPA reload even if change never fires on mobile.
+        saveAmountInput.addEventListener('input', function() {
+            const v = parseFloat(this.value);
+            if (!isNaN(v)) setParams({saveAmount: Math.max(0, Math.min(1, v))}, { restart: false });
+        });
+        bigWinThresholdInput.addEventListener('input', function() {
+            const v = parseFloat(this.value);
+            if (!isNaN(v)) setParams({bigWinThreshold: Math.max(1, v)}, { restart: false });
+        });
+        bigWinMultiplierInput.addEventListener('input', function() {
+            const v = parseFloat(this.value);
+            if (!isNaN(v)) setParams({bigWinMultiplier: Math.max(1, v)}, { restart: false });
+        });
+        checkIntervalInput.addEventListener('input', function() {
+            const v = parseInt(this.value, 10);
+            if (!isNaN(v)) setParams({checkInterval: Math.max(10, v)}, { restart: false });
+        });
 
         document.body.appendChild(widget);
+        restorePosition();
         initHelpTooltips(widget);
 
         return {
@@ -872,6 +1157,194 @@
         apiVaultPollInterval = null;
     }
 
+    // ── Rolling 7-day wager tracker ─────────────────────────────────────
+    // Same design as the Stake claimer's tracker: read the server-side lifetime
+    // wagered counter (Degen's user statistics, USD-equivalent across all
+    // currencies and devices), snapshot it per-account in localStorage, and
+    // difference over 168h to get the rolling-7d wager. Because the lifetime
+    // counter is authoritative, gaps in snapshotting (tab closed, phone off)
+    // never lose wager — the next reading self-corrects; only granularity of
+    // where the 7-day boundary falls is affected.
+    const WAGER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+    const WAGER_KEEP_MS = 9 * 24 * 60 * 60 * 1000;
+    const WAGER_POLL_MS = 60 * 1000;
+
+    let wagerUserId = null;
+    let wagerLifetime = null;
+    let wagerRolling = null;
+    let wagerOk = false;
+    let wagerPollTimer = null;
+    let wagerBackoffUntil = 0;
+
+    // Keys are namespaced per user id so switching accounts in one browser
+    // never interleaves two different lifetime scales in one anchor array.
+    // Null until the account is known — better not to snapshot at all than
+    // to snapshot into the wrong bucket.
+    function wagerKeys() {
+        if (!wagerUserId) return null;
+        return {
+            anchors: `degenvault-wager-anchors::${wagerUserId}`,
+            start: `degenvault-wager-start::${wagerUserId}`
+        };
+    }
+    function wagerGet(key, fallback) {
+        try {
+            const raw = localStorage.getItem(key);
+            return raw == null ? fallback : JSON.parse(raw);
+        } catch (e) { return fallback; }
+    }
+    function wagerSet(key, value) {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+    }
+
+    // Compact figure for the stat box (120000 -> "$120.0k").
+    function wagerFmtShort(n) {
+        if (n == null || !isFinite(n)) return '—';
+        if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+        if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'k';
+        return '$' + Math.round(n);
+    }
+
+    // Degen reports lifetime wagered as a USD figure — sometimes a bare number,
+    // sometimes a string like "12,345.67 USD".
+    function wagerParseAmount(w) {
+        if (typeof w === 'number') return w;
+        if (typeof w !== 'string') return NaN;
+        return parseFloat(w.replace(/[^0-9.]/g, ''));
+    }
+
+    // Append a lifetime snapshot (monotonic; throttle unchanged; prune past
+    // window+margin, but always keep the newest anchor already ≥7d old — that
+    // one is the rolling baseline).
+    function wagerRecordAnchor(cum) {
+        if (!isFinite(cum) || cum < 0) return;
+        const K = wagerKeys();
+        if (!K) return;
+        const now = Date.now();
+        let anchors = wagerGet(K.anchors, []);
+        if (!Array.isArray(anchors)) anchors = [];
+        const last = anchors[anchors.length - 1];
+        if (last) {
+            if (cum < last.cum - 1e-6) return;                                            // lifetime can't drop
+            if (Math.abs(cum - last.cum) < 1e-9 && (now - last.t) < 10 * 60 * 1000) return; // throttle unchanged
+        }
+        anchors.push({ t: now, cum });
+        const minT = now - WAGER_KEEP_MS, cutoff = now - WAGER_WINDOW_MS;
+        let keepIdx = -1;
+        for (let i = 0; i < anchors.length; i++) if (anchors[i].t <= cutoff) keepIdx = i;
+        anchors = anchors.filter((p, idx) => p.t >= minT || idx === keepIdx);
+        wagerSet(K.anchors, anchors);
+    }
+
+    // rolling 168h = lifetime(now) − lifetime(NEWEST snapshot already ≥7d old).
+    // With no anchor that old yet (warm-up) the oldest anchor is the best lower
+    // bound; the UI shows amber until the full window is covered.
+    function wagerComputeRolling() {
+        const K = wagerKeys();
+        if (!K) return null;
+        const anchors = wagerGet(K.anchors, []);
+        if (!Array.isArray(anchors) || !anchors.length) return null;
+        const now = Date.now(), cutoff = now - WAGER_WINDOW_MS;
+        const cur = anchors[anchors.length - 1].cum;
+        let baseline = null;
+        for (let i = 0; i < anchors.length; i++) { if (anchors[i].t <= cutoff) baseline = anchors[i]; }
+        if (!baseline) baseline = anchors[0];
+        return Math.max(0, cur - baseline.cum);
+    }
+
+    function wagerCoverageMs() {
+        const K = wagerKeys();
+        const start = K ? wagerGet(K.start, 0) : 0;
+        return start ? (Date.now() - start) : 0;
+    }
+
+    async function fetchWagerStats() {
+        // Back off after a failure (usually logged out) so the activity log
+        // isn't flooded with a failed API call every poll.
+        if (Date.now() < wagerBackoffUntil) return;
+        try {
+            if (!degenApi) degenApi = new DegenApi();
+            if (!wagerUserId) {
+                const prof = await degenApi.getProfile();
+                const id = prof && !prof.error ? (prof.id || (prof.user && prof.user.id)) : null;
+                if (!id) { wagerFail(); return; }
+                wagerUserId = String(id);
+            }
+            // The public user object is where Degen's own frontend reads
+            // statistics from; /users/{id}/stats is the fallback.
+            let stats = null;
+            const pub = await degenApi.getPublicUser(wagerUserId);
+            if (pub && !pub.error) stats = pub.statistics || pub.stats || null;
+            if (!stats) {
+                const alt = await degenApi.getUserStats(wagerUserId);
+                if (alt && !alt.error) stats = alt.statistics || alt;
+            }
+            const lifetime = stats ? wagerParseAmount(stats.wagered) : NaN;
+            if (isNaN(lifetime)) { wagerFail(); return; }
+            const first = wagerLifetime == null;
+            wagerOk = true;
+            wagerBackoffUntil = 0;
+            wagerLifetime = lifetime;
+            const K = wagerKeys();
+            if (K && !wagerGet(K.start, 0)) wagerSet(K.start, Date.now());   // start the coverage clock
+            wagerRecordAnchor(lifetime);
+            wagerRolling = wagerComputeRolling();
+            if (first) logActivity(`7d wager tracking online — lifetime wagered $${Math.round(lifetime).toLocaleString()}`, 'info');
+            updateWagerUI();
+        } catch (e) {
+            wagerFail();
+        }
+    }
+    function wagerFail() {
+        wagerOk = false;
+        wagerBackoffUntil = Date.now() + 5 * 60 * 1000;
+        updateWagerUI();
+    }
+
+    // Runs whenever a Degen tab is open, independent of Start/Stop — the
+    // rolling window is only as good as its snapshot history.
+    function startWagerTracking() {
+        if (wagerPollTimer) return;
+        fetchWagerStats();
+        wagerPollTimer = setInterval(fetchWagerStats, WAGER_POLL_MS);
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) fetchWagerStats(); });
+    }
+
+    function updateWagerUI() {
+        const el = document.getElementById('dvWager7d');
+        if (!el) return;
+        if (wagerRolling == null) {
+            el.textContent = '—';
+            el.style.color = '';
+            el.title = wagerOk
+                ? 'First reading in — computing the window…'
+                : 'Waiting for the first wager reading (log in to Degen if this persists)';
+            return;
+        }
+        const coverMs = wagerCoverageMs();
+        const full = coverMs >= WAGER_WINDOW_MS;
+        el.textContent = wagerFmtShort(wagerRolling);
+        el.style.color = full ? '' : '#f59e0b';   // amber while the window warms up
+        el.title =
+            `Rolling 7d: $${Math.round(wagerRolling).toLocaleString()}\n` +
+            `Lifetime: ${wagerLifetime != null ? '$' + Math.round(wagerLifetime).toLocaleString() : '—'}\n` +
+            (full ? 'Coverage: full 7d window ✅'
+                  : `Coverage: warming up ${(coverMs / 864e5).toFixed(1)}/7d — reads LOW until a full week is covered`);
+    }
+
+    // F12 console helpers: __degenWagerStatus() / __degenWagerRefresh()
+    window.__degenWagerRefresh = () => fetchWagerStats();
+    window.__degenWagerStatus = () => {
+        const K = wagerKeys();
+        const anchors = K ? wagerGet(K.anchors, []) : [];
+        const coverD = wagerCoverageMs() / 864e5;
+        return {
+            userId: wagerUserId, rolling7d: wagerRolling, lifetime: wagerLifetime,
+            anchors: Array.isArray(anchors) ? anchors.length : 0,
+            coverageDays: +coverD.toFixed(2), full: coverD >= 7, ok: wagerOk
+        };
+    };
+
     function getParams() {
         return {
             saveAmount: SAVE_AMOUNT,
@@ -880,7 +1353,7 @@
             checkInterval: Math.round(CHECK_INTERVAL/1000)
         };
     }
-    function setParams(obj) {
+    function setParams(obj, opts) {
         if (obj.saveAmount !== undefined) SAVE_AMOUNT = obj.saveAmount;
         if (obj.bigWinThreshold !== undefined) BIG_WIN_THRESHOLD = obj.bigWinThreshold;
         if (obj.bigWinMultiplier !== undefined) BIG_WIN_MULTIPLIER = obj.bigWinMultiplier;
@@ -894,7 +1367,8 @@
         };
         saveConfig(config);
 
-        if (running) {
+        const restart = !opts || opts.restart !== false;
+        if (restart && running) {
             stopVaultScript();
             startVaultScript();
         }
@@ -916,6 +1390,54 @@
         setTrackedAsset(primary.asset);
         const n = parseFloat(primary.balance);
         return isNaN(n) ? NaN : n;
+    }
+
+    async function fetchWalletsList() {
+        if (!degenApi) degenApi = new DegenApi();
+        const resp = await degenApi.getWallets();
+        return Array.isArray(resp) ? resp : null;
+    }
+
+    // Manual one-off vault deposit from the Manual tab. Counts against the same
+    // client-side rate limit as auto deposits. Returns true on success.
+    let manualProcessing = false;
+    async function manualVault(asset, amount) {
+        if (manualProcessing) return false;
+        if (!canVaultNow()) {
+            logActivity(pickFlavor(FLAVOR.rateLimit), 'warning');
+            if (uiWidget) uiWidget.updateVaultCount();
+            return false;
+        }
+        manualProcessing = true;
+        try {
+            if (!degenApi) degenApi = new DegenApi();
+            const resp = await degenApi.depositToVault(asset, amount);
+            if (resp && !resp.error && resp.vaultBalance !== undefined) {
+                vaultActionTimestamps.push(Date.now());
+                saveRateLimitData(vaultActionTimestamps);
+                if (vaultDisplay && (asset || '').toUpperCase() === (ASSET || '').toUpperCase()) {
+                    vaultDisplay.update(amount);
+                    vaultDisplay.setApiVaultBalance(resp.vaultBalance);
+                    if (resp.walletBalance !== undefined) {
+                        const wb = parseFloat(resp.walletBalance);
+                        if (!isNaN(wb)) {
+                            oldBalance = wb;
+                            if (uiWidget) uiWidget.updateWalletBalance(wb);
+                        }
+                    }
+                }
+                if (uiWidget) uiWidget.updateVaultCount();
+                logActivity(`Secured ${(+amount).toFixed(6)} ${asset} (manual)`, 'success');
+                return true;
+            }
+            logActivity('Manual vault failed — check amount, balance and rate limit', 'error');
+            return false;
+        } catch (e) {
+            logActivity('Manual vault error: ' + (e.message || 'unknown'), 'error');
+            return false;
+        } finally {
+            manualProcessing = false;
+        }
     }
 
     async function syncCurrency() {
@@ -1037,10 +1559,14 @@
                 getParams,
                 setParams,
                 vaultDisplay,
-                syncCurrency
+                syncCurrency,
+                fetchWalletsList,
+                manualVault
             );
             vaultDisplay.setAsset(ASSET);
             refreshApiVaultBalance();
+            startWagerTracking();
+            updateWagerUI();
         }
     }, INIT_DELAY);
 
